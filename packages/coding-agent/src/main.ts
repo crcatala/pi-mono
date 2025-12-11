@@ -144,6 +144,11 @@ export async function main(args: string[]) {
 		return;
 	}
 
+	if (parsed.version) {
+		console.log(VERSION);
+		return;
+	}
+
 	// Handle --export flag: convert session file to HTML and exit
 	if (parsed.export) {
 		try {
