@@ -281,10 +281,7 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 							// ignore
 						}
 					},
-					waitForCode: async (signal?: AbortSignal) => {
-						if (signal?.aborted) return null;
-						return null;
-					},
+					waitForCode: async (_signal?: AbortSignal) => null,
 				});
 			});
 	});

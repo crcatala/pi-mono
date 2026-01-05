@@ -23,7 +23,6 @@ function prompt(rl: ReturnType<typeof createInterface>, question: string, signal
 			signal?.removeEventListener("abort", onAbort);
 			try {
 				rl.write("\n");
-				rl.close();
 			} catch {
 				// ignore
 			}
