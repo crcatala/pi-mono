@@ -8,13 +8,51 @@ import { loginAntigravity } from "./utils/oauth/google-antigravity.js";
 import { loginGeminiCli } from "./utils/oauth/google-gemini-cli.js";
 import { getOAuthProviders } from "./utils/oauth/index.js";
 import { loginOpenAICodex } from "./utils/oauth/openai-codex.js";
-import type { OAuthCredentials, OAuthProvider } from "./utils/oauth/types.js";
+import type { OAuthCredentials, OAuthPrompt, OAuthProvider } from "./utils/oauth/types.js";
 
 const AUTH_FILE = "auth.json";
 const PROVIDERS = getOAuthProviders();
 
-function prompt(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
-	return new Promise((resolve) => rl.question(question, resolve));
+function prompt(rl: ReturnType<typeof createInterface>, question: string, signal?: AbortSignal): Promise<string> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			try {
+				rl.write("\n");
+				rl.close();
+			} catch {
+				// ignore
+			}
+			const error = new Error("Prompt aborted");
+			error.name = "AbortError";
+			reject(error);
+		};
+
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+
+		if (signal) {
+			signal.addEventListener("abort", onAbort);
+		}
+
+		rl.question(question, (answer) => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			resolve(answer);
+		});
+	});
+}
+
+function promptOAuth(rl: ReturnType<typeof createInterface>, promptInfo: OAuthPrompt): Promise<string> {
+	const suffix = promptInfo.placeholder ? ` (${promptInfo.placeholder})` : "";
+	return prompt(rl, `${promptInfo.message}${suffix}: `, promptInfo.signal);
 }
 
 function loadAuth(): Record<string, { type: "oauth" } & OAuthCredentials> {
@@ -33,7 +71,7 @@ function saveAuth(auth: Record<string, { type: "oauth" } & OAuthCredentials>): v
 async function login(provider: OAuthProvider): Promise<void> {
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-	const promptFn = (msg: string) => prompt(rl, `${msg} `);
+	const promptFn = (msg: string, signal?: AbortSignal) => prompt(rl, `${msg} `, signal);
 
 	try {
 		let credentials: OAuthCredentials;
@@ -58,7 +96,7 @@ async function login(provider: OAuthProvider): Promise<void> {
 						console.log();
 					},
 					onPrompt: async (p) => {
-						return await promptFn(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+						return await promptOAuth(rl, p);
 					},
 					onProgress: (msg) => console.log(msg),
 				});
@@ -93,7 +131,7 @@ async function login(provider: OAuthProvider): Promise<void> {
 						console.log();
 					},
 					onPrompt: async (p) => {
-						return await promptFn(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+						return await promptOAuth(rl, p);
 					},
 					onProgress: (msg) => console.log(msg),
 				});

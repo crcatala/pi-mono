@@ -12,6 +12,7 @@ import {
 	loginGitHubCopilot,
 	loginOpenAICodex,
 	type OAuthCredentials,
+	type OAuthPrompt,
 	type OAuthProvider,
 } from "@mariozechner/pi-ai";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -155,7 +156,7 @@ export class AuthStorage {
 		provider: OAuthProvider,
 		callbacks: {
 			onAuth: (info: { url: string; instructions?: string }) => void;
-			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
+			onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 			onProgress?: (message: string) => void;
 		},
 	): Promise<void> {

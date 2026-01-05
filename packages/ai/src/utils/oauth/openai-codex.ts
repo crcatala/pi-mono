@@ -71,6 +71,36 @@ function parseAuthorizationInput(input: string): { code?: string; state?: string
 	return { code: value };
 }
 
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError";
+}
+
+async function resolveAuthorizationCode(
+	input: string,
+	state: string,
+	onPrompt: (prompt: OAuthPrompt) => Promise<string>,
+): Promise<string> {
+	const parse = (value: string) => {
+		const parsed = parseAuthorizationInput(value);
+		if (parsed.state && parsed.state !== state) {
+			throw new Error("State mismatch");
+		}
+		return parsed.code;
+	};
+
+	let code = parse(input);
+	if (!code) {
+		const fallback = await onPrompt({
+			message: "Paste the authorization code (or full redirect URL):",
+		});
+		code = parse(fallback);
+	}
+	if (!code) {
+		throw new Error("Missing authorization code");
+	}
+	return code;
+}
+
 function decodeJwt(token: string): JwtPayload | null {
 	try {
 		const parts = token.split(".");
@@ -187,7 +217,7 @@ async function createAuthorizationFlow(): Promise<{ verifier: string; state: str
 
 type OAuthServerInfo = {
 	close: () => void;
-	waitForCode: () => Promise<{ code: string } | null>;
+	waitForCode: (signal?: AbortSignal) => Promise<{ code: string } | null>;
 };
 
 function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
@@ -226,10 +256,11 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 			.listen(1455, "127.0.0.1", () => {
 				resolve({
 					close: () => server.close(),
-					waitForCode: async () => {
+					waitForCode: async (signal?: AbortSignal) => {
 						const sleep = () => new Promise((r) => setTimeout(r, 100));
 						for (let i = 0; i < 600; i += 1) {
 							if (lastCode) return { code: lastCode };
+							if (signal?.aborted) return null;
 							await sleep();
 						}
 						return null;
@@ -250,7 +281,10 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 							// ignore
 						}
 					},
-					waitForCode: async () => null,
+					waitForCode: async (signal?: AbortSignal) => {
+						if (signal?.aborted) return null;
+						return null;
+					},
 				});
 			});
 	});
@@ -277,21 +311,47 @@ export async function loginOpenAICodex(options: {
 	options.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
 
 	let code: string | undefined;
-	try {
-		const result = await server.waitForCode();
-		if (result?.code) {
-			code = result.code;
-		}
+	const manualController = new AbortController();
+	const callbackController = new AbortController();
 
-		if (!code) {
-			const input = await options.onPrompt({
-				message: "Paste the authorization code (or full redirect URL):",
-			});
-			const parsed = parseAuthorizationInput(input);
-			if (parsed.state && parsed.state !== state) {
-				throw new Error("State mismatch");
+	const manualPrompt = options
+		.onPrompt({
+			message: "Waiting for browser callback. Press Enter to paste the authorization code now:",
+			allowEmpty: true,
+			signal: manualController.signal,
+		})
+		.then((input) => ({ type: "manual" as const, input }))
+		.catch((error: unknown) => ({ type: "manual-error" as const, error }));
+
+	const callbackPrompt = server
+		.waitForCode(callbackController.signal)
+		.then((result) => ({ type: "callback" as const, result }));
+
+	try {
+		const first = await Promise.race([manualPrompt, callbackPrompt]);
+
+		if (first.type === "manual") {
+			callbackController.abort();
+			code = await resolveAuthorizationCode(first.input, state, options.onPrompt);
+		} else if (first.type === "callback") {
+			if (first.result?.code) {
+				manualController.abort();
+				code = first.result.code;
+			} else {
+				const manual = await manualPrompt;
+				if (manual.type === "manual") {
+					code = await resolveAuthorizationCode(manual.input, state, options.onPrompt);
+				} else if (!isAbortError(manual.error)) {
+					throw manual.error;
+				}
 			}
-			code = parsed.code;
+		} else if (isAbortError(first.error)) {
+			const callback = await callbackPrompt;
+			if (callback.result?.code) {
+				code = callback.result.code;
+			}
+		} else {
+			throw first.error;
 		}
 
 		if (!code) {
@@ -315,6 +375,8 @@ export async function loginOpenAICodex(options: {
 			accountId,
 		};
 	} finally {
+		callbackController.abort();
+		manualController.abort();
 		server.close();
 	}
 }

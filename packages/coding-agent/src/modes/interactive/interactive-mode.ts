@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import Clipboard from "@crosscopy/clipboard";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, Message, OAuthProvider } from "@mariozechner/pi-ai";
+import type { AssistantMessage, Message, OAuthPrompt, OAuthProvider } from "@mariozechner/pi-ai";
 import type { KeyId, SlashCommand } from "@mariozechner/pi-tui";
 import {
 	CombinedAutocompleteProvider,
@@ -2156,7 +2156,7 @@ export class InteractiveMode {
 												: "xdg-open";
 									exec(`${openCmd} "${info.url}"`);
 								},
-								onPrompt: async (prompt: { message: string; placeholder?: string }) => {
+								onPrompt: async (prompt: OAuthPrompt) => {
 									this.chatContainer.addChild(new Spacer(1));
 									this.chatContainer.addChild(new Text(theme.fg("warning", prompt.message), 1, 0));
 									if (prompt.placeholder) {
@@ -2164,15 +2164,44 @@ export class InteractiveMode {
 									}
 									this.ui.requestRender();
 
-									return new Promise<string>((resolve) => {
-										const codeInput = new Input();
-										codeInput.onSubmit = () => {
-											const code = codeInput.getValue();
+									return new Promise<string>((resolve, reject) => {
+										let settled = false;
+
+										const cleanup = () => {
 											this.editorContainer.clear();
 											this.editorContainer.addChild(this.editor);
 											this.ui.setFocus(this.editor);
-											resolve(code);
+											this.ui.requestRender();
 										};
+
+										const onAbort = () => {
+											if (settled) return;
+											settled = true;
+											prompt.signal?.removeEventListener("abort", onAbort);
+											cleanup();
+											const error = new Error("Prompt aborted");
+											error.name = "AbortError";
+											reject(error);
+										};
+
+										const finish = (value: string) => {
+											if (settled) return;
+											settled = true;
+											prompt.signal?.removeEventListener("abort", onAbort);
+											cleanup();
+											resolve(value);
+										};
+
+										if (prompt.signal?.aborted) {
+											onAbort();
+											return;
+										}
+
+										const codeInput = new Input();
+										codeInput.onSubmit = () => finish(codeInput.getValue());
+										if (prompt.signal) {
+											prompt.signal.addEventListener("abort", onAbort);
+										}
 										this.editorContainer.clear();
 										this.editorContainer.addChild(codeInput);
 										this.ui.setFocus(codeInput);
