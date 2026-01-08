@@ -54,6 +54,17 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 }
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+
+/**
+ * Endpoint fallback order for Antigravity (daily sandbox -> autopush sandbox -> prod).
+ * Based on opencode-google-antigravity-auth implementation.
+ */
+const ANTIGRAVITY_ENDPOINT_FALLBACKS = [
+	"https://daily-cloudcode-pa.sandbox.googleapis.com",
+	"https://autopush-cloudcode-pa.sandbox.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
+] as const;
+
 // Headers for Gemini CLI (prod endpoint)
 const GEMINI_CLI_HEADERS = {
 	"User-Agent": "google-cloud-sdk vscode_cloudshelleditor/0.1",
@@ -173,6 +184,8 @@ interface CloudCodeAssistRequest {
 				mode: ReturnType<typeof mapToolChoice>;
 			};
 		};
+		/** Session ID for request tracking and caching. */
+		sessionId?: string;
 	};
 	userAgent?: string;
 	requestId?: string;
@@ -257,70 +270,104 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				throw new Error("Missing token or projectId in Google Cloud credentials. Use /login to re-authenticate.");
 			}
 
-			const requestBody = buildRequest(model, context, projectId, options);
-			const endpoint = model.baseUrl || DEFAULT_ENDPOINT;
-			const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
+			// Determine if this is an Antigravity model (uses sandbox endpoints)
+			const isAntigravity = model.provider === "google-antigravity";
 
-			// Use Antigravity headers for sandbox endpoint, otherwise Gemini CLI headers
-			const isAntigravity = endpoint.includes("sandbox.googleapis.com");
+			// Build request with appropriate userAgent and sessionId
+			const requestBody = buildRequest(model, context, projectId, options, isAntigravity);
+
+			// Get endpoints to try - Antigravity uses fallback list, others use single endpoint
+			const endpoints = isAntigravity ? ANTIGRAVITY_ENDPOINT_FALLBACKS : [model.baseUrl || DEFAULT_ENDPOINT];
+
+			// Use appropriate headers based on provider
 			const headers = isAntigravity ? ANTIGRAVITY_HEADERS : GEMINI_CLI_HEADERS;
 
-			// Fetch with retry logic for rate limits and transient errors
+			// Fetch with endpoint fallback and retry logic
 			let response: Response | undefined;
 			let lastError: Error | undefined;
+			let lastErrorText: string | undefined;
 
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-				if (options?.signal?.aborted) {
-					throw new Error("Request was aborted");
-				}
+			// Try each endpoint in fallback order
+			endpointLoop: for (const endpoint of endpoints) {
+				const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
 
-				try {
-					response = await fetch(url, {
-						method: "POST",
-						headers: {
-							Authorization: `Bearer ${accessToken}`,
-							"Content-Type": "application/json",
-							Accept: "text/event-stream",
-							...headers,
-						},
-						body: JSON.stringify(requestBody),
-						signal: options?.signal,
-					});
-
-					if (response.ok) {
-						break; // Success, exit retry loop
+				// Retry loop for each endpoint
+				for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+					if (options?.signal?.aborted) {
+						throw new Error("Request was aborted");
 					}
 
-					const errorText = await response.text();
+					try {
+						response = await fetch(url, {
+							method: "POST",
+							headers: {
+								Authorization: `Bearer ${accessToken}`,
+								"Content-Type": "application/json",
+								Accept: "text/event-stream",
+								...headers,
+							},
+							body: JSON.stringify(requestBody),
+							signal: options?.signal,
+						});
 
-					// Check if retryable
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						// Use server-provided delay or exponential backoff
-						const serverDelay = extractRetryDelay(errorText);
-						const delayMs = serverDelay ?? BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
+						if (response.ok) {
+							break endpointLoop; // Success, exit both loops
+						}
 
-					// Not retryable or max retries exceeded
-					throw new Error(`Cloud Code Assist API error (${response.status}): ${errorText}`);
-				} catch (error) {
-					if (error instanceof Error && error.message === "Request was aborted") {
-						throw error;
+						const errorText = await response.text();
+						lastErrorText = errorText;
+
+						// 403 means this endpoint doesn't work for us, try next endpoint
+						if (response.status === 403 && endpoints.length > 1) {
+							break; // Try next endpoint
+						}
+
+						// 404 means endpoint doesn't exist, try next endpoint
+						if (response.status === 404 && endpoints.length > 1) {
+							break; // Try next endpoint
+						}
+
+						// Check if retryable (429, 5xx, etc.)
+						if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
+							// Use server-provided delay or exponential backoff
+							const serverDelay = extractRetryDelay(errorText);
+							const delayMs = serverDelay ?? BASE_DELAY_MS * 2 ** attempt;
+							await sleep(delayMs, options?.signal);
+							continue;
+						}
+
+						// Not retryable or max retries exceeded, try next endpoint if available
+						if (endpoints.length > 1) {
+							break; // Try next endpoint
+						}
+
+						// Single endpoint case - throw error
+						throw new Error(`Cloud Code Assist API error (${response.status}): ${errorText}`);
+					} catch (error) {
+						if (error instanceof Error && error.message === "Request was aborted") {
+							throw error;
+						}
+						lastError = error instanceof Error ? error : new Error(String(error));
+						// Network errors are retryable
+						if (attempt < MAX_RETRIES) {
+							const delayMs = BASE_DELAY_MS * 2 ** attempt;
+							await sleep(delayMs, options?.signal);
+							continue;
+						}
+						// Max retries exceeded, try next endpoint if available
+						if (endpoints.length > 1) {
+							break; // Try next endpoint
+						}
+						throw lastError;
 					}
-					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
-					if (attempt < MAX_RETRIES) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-					throw lastError;
 				}
 			}
 
 			if (!response || !response.ok) {
-				throw lastError ?? new Error("Failed to get response after retries");
+				const errorMsg = lastErrorText
+					? `Cloud Code Assist API error (${response?.status}): ${lastErrorText}`
+					: (lastError?.message ?? "Failed to get response after trying all endpoints");
+				throw new Error(errorMsg);
 			}
 
 			if (!response.body) {
@@ -547,11 +594,29 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 	return stream;
 };
 
+// Session ID counter for unique session generation
+let sessionCounter = 0;
+
+/**
+ * Generate a unique session ID for request tracking.
+ */
+function generateSessionId(): string {
+	return `pi-session-${Date.now()}-${++sessionCounter}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Generate a unique request ID.
+ */
+function generateRequestId(): string {
+	return `pi-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
 function buildRequest(
 	model: Model<"google-gemini-cli">,
 	context: Context,
 	projectId: string,
 	options: GoogleGeminiCliOptions = {},
+	isAntigravity: boolean = false,
 ): CloudCodeAssistRequest {
 	const contents = convertMessages(model, context);
 
@@ -603,11 +668,17 @@ function buildRequest(
 		}
 	}
 
+	// Add sessionId for Antigravity endpoints (matches opencode-antigravity behavior)
+	if (isAntigravity) {
+		request.sessionId = generateSessionId();
+	}
+
 	return {
 		project: projectId,
 		model: model.id,
 		request,
-		userAgent: "pi-coding-agent",
-		requestId: `pi-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+		// Use "antigravity" userAgent for sandbox endpoints (matches official implementation)
+		userAgent: isAntigravity ? "antigravity" : "pi-coding-agent",
+		requestId: generateRequestId(),
 	};
 }
