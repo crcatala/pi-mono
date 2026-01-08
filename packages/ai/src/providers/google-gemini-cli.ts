@@ -78,12 +78,10 @@ const GEMINI_CLI_HEADERS = {
 
 // Headers for Antigravity (sandbox endpoint) - requires specific User-Agent
 const ANTIGRAVITY_HEADERS = {
-	"User-Agent": "antigravity/1.11.5 darwin/arm64",
+	"User-Agent": "antigravity/1.13.3 darwin/arm64",
 	"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
 	"Client-Metadata": JSON.stringify({
-		ideType: "IDE_UNSPECIFIED",
-		platform: "PLATFORM_UNSPECIFIED",
-		pluginType: "GEMINI",
+		ideType: "ANTIGRAVITY",
 	}),
 };
 
@@ -189,6 +187,8 @@ interface CloudCodeAssistRequest {
 	};
 	userAgent?: string;
 	requestId?: string;
+	/** Request type - "agent" for Antigravity agent requests */
+	requestType?: string;
 }
 
 interface CloudCodeAssistResponseChunk {
@@ -673,12 +673,19 @@ function buildRequest(
 		request.sessionId = generateSessionId();
 	}
 
-	return {
+	const result: CloudCodeAssistRequest = {
 		project: projectId,
 		model: model.id,
 		request,
 		// Use "antigravity" userAgent for sandbox endpoints (matches official implementation)
 		userAgent: isAntigravity ? "antigravity" : "pi-coding-agent",
-		requestId: generateRequestId(),
+		requestId: isAntigravity ? `agent-${crypto.randomUUID()}` : generateRequestId(),
 	};
+
+	// Add requestType for Antigravity (matches official implementation)
+	if (isAntigravity) {
+		result.requestType = "agent";
+	}
+
+	return result;
 }

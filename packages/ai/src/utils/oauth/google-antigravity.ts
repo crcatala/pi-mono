@@ -137,17 +137,16 @@ async function discoverProject(accessToken: string, onProgress?: (message: strin
 	const headers = {
 		Authorization: `Bearer ${accessToken}`,
 		"Content-Type": "application/json",
-		"User-Agent": "google-api-nodejs-client/9.15.1",
+		// Match official Antigravity User-Agent
+		"User-Agent": "antigravity/1.13.3 darwin/arm64",
 		"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
 		"Client-Metadata": JSON.stringify({
-			ideType: "IDE_UNSPECIFIED",
-			platform: "PLATFORM_UNSPECIFIED",
-			pluginType: "GEMINI",
+			ideType: "ANTIGRAVITY",
 		}),
 	};
 
-	// Try endpoints in order: prod first, then sandbox
-	const endpoints = ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.sandbox.googleapis.com"];
+	// Try endpoints in order: daily sandbox first (matches official Antigravity), then prod
+	const endpoints = ["https://daily-cloudcode-pa.sandbox.googleapis.com", "https://cloudcode-pa.googleapis.com"];
 
 	onProgress?.("Checking for existing project...");
 
@@ -156,11 +155,10 @@ async function discoverProject(accessToken: string, onProgress?: (message: strin
 			const loadResponse = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
 				method: "POST",
 				headers,
+				// Match official Antigravity request format
 				body: JSON.stringify({
 					metadata: {
-						ideType: "IDE_UNSPECIFIED",
-						platform: "PLATFORM_UNSPECIFIED",
-						pluginType: "GEMINI",
+						ideType: "ANTIGRAVITY",
 					},
 				}),
 			});
